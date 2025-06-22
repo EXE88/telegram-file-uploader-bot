@@ -1,14 +1,23 @@
 import os
 import hashlib
 import sqlite3
+import secrets
 from datetime import datetime
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-
-TOKEN = 'BOT_TOKEN'
-BASE_DIR = 'uploads'
-DB_FILE = 'database.db'
-os.makedirs(BASE_DIR, exist_ok=True)
+from telegram import (
+    Update,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -26,10 +35,12 @@ def init_db():
                     original_filename TEXT,
                     filetype TEXT,
                     user_id INTEGER,
+                    download_token TEXT,
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )''')
     conn.commit()
     conn.close()
+
 
 def add_user(user):
     conn = sqlite3.connect(DB_FILE)
@@ -39,20 +50,21 @@ def add_user(user):
     conn.commit()
     conn.close()
 
+
 def get_user_phone(user_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT phone FROM users WHERE user_id=?", (user_id,))
     res = c.fetchone()
     conn.close()
-    if res:
-        return res[0]
-    return None
+    return res[0] if res else None
+
 
 def ensure_user_folder(user):
     path = os.path.join(BASE_DIR, str(user.id))
     os.makedirs(path, exist_ok=True)
     return path
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -66,10 +78,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     kb = [
-        ["📁 دریافت تمامی فایل های ذخیره شده", "📊 نمایش وضعیت"]
+        ["📁 دریافت تمامی فایل های ذخیره شده", "📊 نمایش وضعیت"],["📤 دریافت آخرین فایل آپلودی"]
     ]
     reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, one_time_keyboard=False)
-    await update.message.reply_text("🥳 به ربات سیبیل اپلودر خوش امدید 🥳", reply_markup=reply_markup)
+    await update.message.reply_text("🥳 به ربات سیبیل اپلودر خوش آمدید 🥳", reply_markup=reply_markup)
+
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -81,19 +94,18 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        kb = [
-            ["📁 دریافت تمامی فایل های ذخیره شده", "📊 نمایش وضعیت"]
-        ]
+        kb = [["📁 دریافت تمامی فایل های ذخیره شده", "📊 نمایش وضعیت"],["📤 دریافت آخرین فایل آپلودی"]]
         reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, one_time_keyboard=False)
         await update.message.reply_text("✅ شماره تلفن شما تایید و ذخیره شد حالا میتوانید ادامه دهید ✅", reply_markup=reply_markup)
     else:
-        await update.message.reply_text("❌ لطفا شماره لطفا خودتان را ارسال کنید ❌")
+        await update.message.reply_text("❌ لطفا شماره خودتان را ارسال کنید ❌")
+
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     phone = get_user_phone(user.id)
     if not phone:
-        await update.message.reply_text("❌ لطفا ابتدا شماره خود را ارسال و تایید کنید تا بتوانید فایل ارسال کنید ❌")
+        await update.message.reply_text("❌ لطفا ابتدا شماره خود را ارسال و تایید کنید ❌")
         return
 
     if update.message.document:
@@ -106,73 +118,81 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filetype = "image"
     elif update.message.video:
         file = update.message.video
-        original_filename = file.file_name if file.file_name else f"video_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp4"
+        original_filename = file.file_name or f"video_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp4"
         filetype = "video"
     elif update.message.audio:
         file = update.message.audio
-        original_filename = file.file_name if file.file_name else f"audio_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
+        original_filename = file.file_name or f"audio_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
         filetype = "audio"
     else:
-        await update.message.reply_text("❌ لطفا فقط فایل متنی , عکس , ویدیو و یا موزیک ارسال کنید ❌")
+        await update.message.reply_text("❌ لطفا فقط عکس، ویدیو، موزیک یا سند ارسال کنید ❌")
         return
 
-    waiting_msg = await update.message.reply_text("⏳ در حال دانلود فایل، لطفاً صبور باشید...", reply_to_message_id=update.message.message_id)
+    waiting_msg = await update.message.reply_text("⏳ در حال دانلود فایل...", reply_to_message_id=update.message.message_id)
 
     ext = os.path.splitext(original_filename)[1]
-    hash_base = original_filename + str(user.id) + datetime.now().strftime('%Y%m%d%H%M%S%f')
-    hashed_name = hashlib.sha256(hash_base.encode()).hexdigest() + ext
-
+    hashed_name = hashlib.sha256((original_filename + str(user.id) + datetime.now().isoformat()).encode()).hexdigest() + ext
     user_folder = ensure_user_folder(user)
     file_path = os.path.join(user_folder, hashed_name)
 
     new_file = await file.get_file()
     await new_file.download_to_drive(file_path)
 
+    token = str(secrets.token_urlsafe(32))
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO files (filename, original_filename, filetype, user_id) VALUES (?, ?, ?, ?)",
-              (hashed_name, original_filename, filetype, user.id))
+    c.execute("INSERT INTO files (filename, original_filename, filetype, user_id, download_token) VALUES (?, ?, ?, ?, ?)",
+              (hashed_name, original_filename, filetype, user.id, token))
     conn.commit()
     conn.close()
 
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=waiting_msg.message_id)
+    await context.bot.delete_message(update.effective_chat.id, waiting_msg.message_id)
     await update.message.reply_text("✅ فایل ذخیره شد", reply_to_message_id=update.message.message_id)
+
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     phone = get_user_phone(user.id)
     if not phone:
-        await update.message.reply_text("❌ لطفا ابتدا شماره خود را ارسال و تایید کنید تا بتوانید از این قابلیت استفاده کنید ❌")
+        await update.message.reply_text("❌ لطفا ابتدا شماره خود را ارسال و تایید کنید ❌")
         return
 
-    text = update.message.text
-    if text == "📁 دریافت تمامی فایل های ذخیره شده":
+    if update.message.text == "📁 دریافت تمامی فایل های ذخیره شده":
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT filename, filetype, original_filename FROM files WHERE user_id=?", (user.id,))
+        c.execute("SELECT id, filename, filetype, original_filename FROM files WHERE user_id=?", (user.id,))
         files = c.fetchall()
         conn.close()
 
         if not files:
-            await update.message.reply_text("هیچ فایلی تا کنون ذخیره نشده است ❌")
+            await update.message.reply_text("❌ هیچ فایلی یافت نشد")
             return
 
         user_folder = ensure_user_folder(user)
-
-        for filename, filetype, original_name in files:
+        for file_id, filename, filetype, original_name in files:
             file_path = os.path.join(user_folder, filename)
-            if os.path.exists(file_path):
-                if filetype.startswith("image"):
-                    await update.message.reply_photo(photo=open(file_path, 'rb'), caption=original_name)
-                elif filetype.startswith("video"):
-                    await update.message.reply_video(video=open(file_path, 'rb'), caption=original_name)
-                elif filetype.startswith("audio"):
-                    await update.message.reply_audio(audio=open(file_path, 'rb'), caption=original_name)
-                else:
-                    await update.message.reply_document(document=open(file_path, 'rb'), caption=original_name)
+            if not os.path.exists(file_path):
+                await update.message.reply_text(f"فایل {original_name} پیدا نشد.")
+                continue
+
+            button_list = [[InlineKeyboardButton("📥 دریافت لینک دانلود", callback_data=f"getlink_{file_id}")]]
+
+            if filetype.endswith("mp4"):
+                video_url = f"http://{WEBSERVIECE_IP}/watch/{user.id}/{filename}"
+                button_list.append([InlineKeyboardButton("🎬 پخش ویدیو", url=video_url)])
+
+            buttons = InlineKeyboardMarkup(button_list)
+
+            if filetype.startswith("image"):
+                await update.message.reply_photo(photo=open(file_path, 'rb'), caption=original_name, reply_markup=buttons)
+            elif filetype.startswith("video"):
+                await update.message.reply_video(video=open(file_path, 'rb'), caption=original_name, reply_markup=buttons)
+            elif filetype.startswith("audio"):
+                await update.message.reply_audio(audio=open(file_path, 'rb'), caption=original_name, reply_markup=buttons)
             else:
-                await update.message.reply_text(f"File {original_name} not found.")
-    elif text == "📊 نمایش وضعیت":
+                await update.message.reply_document(document=open(file_path, 'rb'), caption=original_name, reply_markup=buttons)
+
+    elif update.message.text == "📊 نمایش وضعیت":
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT filetype, COUNT(*) FROM files WHERE user_id=? GROUP BY filetype", (user.id,))
@@ -180,7 +200,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         if not stats:
-            await update.message.reply_text("هیچ فایلی تا کنون ذخیره نشده است ❌")
+            await update.message.reply_text("❌ هیچ فایلی یافت نشد")
             return
 
         msg = "<b>📊 وضعیت آپلودهای شما:</b>\n\n"
@@ -188,7 +208,74 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"<b>{ftype}</b> : <code>{count}</code> فایل\n"
         await update.message.reply_text(msg, parse_mode="HTML")
 
+    elif update.message.text == "📤 دریافت آخرین فایل آپلودی":
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT id, filename, filetype, original_filename FROM files WHERE user_id=? ORDER BY id DESC LIMIT 1", (user.id,))
+        last_file = c.fetchone()
+        conn.close()
+
+        if not last_file:
+            await update.message.reply_text("❌ هنوز هیچ فایلی آپلود نکرده‌اید.")
+            return
+
+        file_id, filename, filetype, original_name = last_file
+        user_folder = ensure_user_folder(user)
+        file_path = os.path.join(user_folder, filename)
+
+        if not os.path.exists(file_path):
+            await update.message.reply_text("❌ فایل یافت نشد.")
+            return
+
+        button_list = [[InlineKeyboardButton("📤 دریافت لینک دانلود", callback_data=f"getlink_{file_id}")]]
+
+        if filetype.endswith("mp4"):
+            video_url = f"http://{WEBSERVIECE_IP}/watch/{user.id}/{filename}"
+            button_list.append([InlineKeyboardButton("🎬 پخش ویدیو", url=video_url)])
+
+        reply_markup = InlineKeyboardMarkup(button_list)
+
+        if filetype.startswith("image"):
+            await update.message.reply_photo(photo=open(file_path, 'rb'), caption=original_name, reply_markup=reply_markup)
+        elif filetype.startswith("video"):
+            await update.message.reply_video(video=open(file_path, 'rb'), caption=original_name, reply_markup=reply_markup)
+        elif filetype.startswith("audio"):
+            await update.message.reply_audio(audio=open(file_path, 'rb'), caption=original_name, reply_markup=reply_markup)
+        else:
+            await update.message.reply_document(document=open(file_path, 'rb'), caption=original_name, reply_markup=reply_markup)
+
+
+def generate_and_store_token(file_id):
+    token = str(secrets.token_urlsafe(32))
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE files SET download_token=? WHERE id=?", (token, file_id))
+    conn.commit()
+    conn.close()
+    return token
+
+async def download_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    file_id = int(query.data.replace("getlink_", ""))
+    token = generate_and_store_token(file_id)
+
+    if token:
+        url = f"http://{WEBSERVIECE_IP}/download?token={token}"
+        await query.message.reply_text(f"🔗 لینک دانلود (یک‌بار مصرف):\n{url}")
+
+    else:
+        await query.message.reply_text("❌ فایل مورد نظر یافت نشد یا متعلق به شما نیست.")
+
+
 if __name__ == '__main__':
+    TOKEN = 'TOKEN'
+    BASE_DIR = 'uploads'
+    DB_FILE = 'database.db'
+    WEBSERVIECE_IP = 'HOST:8002'
+    os.makedirs(BASE_DIR, exist_ok=True)
+    
     init_db()
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -196,6 +283,7 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, handle_file))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+    app.add_handler(CallbackQueryHandler(download_link_callback, pattern=r"getlink_\d+"))
 
     print("Bot is running...")
     app.run_polling()
