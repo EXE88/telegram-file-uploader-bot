@@ -10,6 +10,6 @@ Features :
 - safe and secure
 - simple and easy user interface
 
-edit this values in file : \n
+edit this values in file : 
 - main.py --> lines 273,276 --> values HOST and TOKEN
 - download_link_webservice.py --> line 53 --> value HOST
